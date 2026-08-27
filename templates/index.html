@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forecasting Alemania - Live</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="background-orbs">
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+    </div>
+
+    <div class="glass-container">
+        <header>
+            <h1><span class="live-indicator"></span> DE Demand <span>Forecast</span></h1>
+            <p>Monitoreo Autorregresivo LightGBM | Zona Horaria: <strong>Europa/Berlín (Local)</strong></p>
+        </header>
+
+        <div class="controls-wrapper" style="display: flex; justify-content: center; gap: 40px; margin-bottom: 15px;">
+            <div class="control-group" style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+                <span class="control-label" style="font-size: 0.85rem; color: rgba(255, 255, 255, 0.5); text-transform: uppercase; letter-spacing: 1px;">Horizonte de Predicción</span>
+                <div class="horizon-controls" style="margin-bottom: 0;">
+                    <button class="horizon-btn" data-horizon="1h">1h</button>
+                    <button class="horizon-btn" data-horizon="6h">6h</button>
+                    <button class="horizon-btn" data-horizon="12h">12h</button>
+                    <button class="horizon-btn active" data-horizon="24h">24h</button>
+                    <button class="horizon-btn" data-horizon="48h">48h</button>
+                    <button class="horizon-btn" data-horizon="72h">72h</button>
+                    <button class="horizon-btn" data-horizon="168h">1Sem</button>
+                </div>
+            </div>
+            
+            <div class="control-group" style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+                <span class="control-label" style="font-size: 0.85rem; color: rgba(255, 255, 255, 0.5); text-transform: uppercase; letter-spacing: 1px;">Ventana de Gráfico (Zoom)</span>
+                <div class="zoom-controls" style="display: flex; gap: 10px;">
+                    <button class="zoom-btn active" data-past="24" data-future="12">1 Día</button>
+                    <button class="zoom-btn" data-past="72" data-future="24">3 Días</button>
+                    <button class="zoom-btn" data-past="168" data-future="72">1 Sem.</button>
+                    <button class="zoom-btn" data-past="336" data-future="168">2 Sem.</button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="metrics-panel">
+            <div class="metric"><span class="metric-label">N:</span> <span id="metric-n">--/--</span></div>
+            <div class="metric"><span class="metric-label">MAE:</span> <span id="metric-mae">--</span> MW</div>
+            <div class="metric"><span class="metric-label">RMSE:</span> <span id="metric-rmse">--</span> MW</div>
+            <div class="metric"><span class="metric-label">Pearson (R):</span> <span id="metric-pearson">--</span></div>
+        </div>
+
+        <div class="chart-wrapper">
+            <canvas id="demandChart"></canvas>
+        </div>
+        
+        <div class="status-bar" style="display: flex; justify-content: space-between; align-items: center;">
+            <p id="last-update">Actualizando datos...</p>
+            <div class="api-status-container">
+                <div class="api-status-item">
+                    <span>SMARD API</span>
+                    <span id="smard-status-indicator" class="status-indicator"></span>
+                    <span id="smard-status-time" class="api-status-time">(--)</span>
+                </div>
+                <div class="api-status-item">
+                    <span>Open-Meteo API</span>
+                    <span id="meteo-status-indicator" class="status-indicator"></span>
+                    <span id="meteo-status-time" class="api-status-time">(--)</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const ctx = document.getElementById('demandChart').getContext('2d');
+        let demandChart;
+        let currentHorizon = '24h';
+        let currentPast = 24;
+        let currentFuture = 12;
+        let latestData = null;
+
+        function updateMetrics(realArray, predArray) {
+            let sumAbsError = 0;
+            let sumSqError = 0;
+            let sumReal = 0;
+            let sumPred = 0;
+            let count = 0;
+            let totalPossible = 0;
+            let validReal = [];
+            let validPred = [];
+
+            for (let i = 0; i < realArray.length; i++) {
+                let real = realArray[i];
+                let pred = predArray[i];
+                
+                // Contar los puntos del pasado donde la realidad existe (denominador)
+                if (real != null && !isNaN(real)) {
+                    totalPossible++;
+                }
+
+                // Ignorar si alguno de los dos valores falta (null, undefined o no es un número válido)
+                if (real != null && pred != null && !isNaN(real) && !isNaN(pred)) {
+                    validReal.push(real);
+                    validPred.push(pred);
+                    let err = real - pred;
+                    sumAbsError += Math.abs(err);
+                    sumSqError += (err * err);
+                    sumReal += real;
+                    sumPred += pred;
+                    count++;
+                }
+            }
+
+            if (count === 0) {
+                document.getElementById('metric-n').innerText = `0/${totalPossible}`;
+                document.getElementById('metric-mae').innerText = '--';
+                document.getElementById('metric-rmse').innerText = '--';
+                document.getElementById('metric-pearson').innerText = '--';
+                return;
+            }
+
+            let mae = (sumAbsError / count).toFixed(1);
+            let rmse = Math.sqrt(sumSqError / count).toFixed(1);
+
+            let meanReal = sumReal / count;
+            let meanPred = sumPred / count;
+            let num = 0;
+            let denReal = 0;
+            let denPred = 0;
+
+            for (let i = 0; i < count; i++) {
+                let diffReal = validReal[i] - meanReal;
+                let diffPred = validPred[i] - meanPred;
+                num += diffReal * diffPred;
+                denReal += diffReal * diffReal;
+                denPred += diffPred * diffPred;
+            }
+
+            let pearson = (denReal === 0 || denPred === 0) ? "--" : (num / Math.sqrt(denReal * denPred)).toFixed(4);
+
+            document.getElementById('metric-n').innerText = `${count}/${totalPossible}`;
+            document.getElementById('metric-mae').innerText = mae;
+            document.getElementById('metric-rmse').innerText = rmse;
+            document.getElementById('metric-pearson').innerText = pearson;
+        }
+
+        document.querySelectorAll('.horizon-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                document.querySelectorAll('.horizon-btn').forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                currentHorizon = e.target.getAttribute('data-horizon');
+                
+                if (latestData && latestData.predicted) {
+                    demandChart.data.datasets[1].data = latestData.predicted[currentHorizon];
+                    demandChart.data.datasets[1].label = `Predicción Modelo (${currentHorizon}) (MW)`;
+                    
+                    updateMetrics(latestData.real, latestData.predicted[currentHorizon]);
+                    
+                    demandChart.update();
+                }
+            });
+        });
+
+        document.querySelectorAll('.zoom-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                document.querySelectorAll('.zoom-btn').forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                currentPast = parseInt(e.target.getAttribute('data-past'));
+                currentFuture = parseInt(e.target.getAttribute('data-future'));
+                
+                document.getElementById('last-update').innerText = `Recargando escala temporal...`;
+                updateData(); // Llama a la API con los nuevos parámetros
+            });
+        });
+
+        function initChart() {
+            const pastFuturePlugin = {
+                id: 'pastFutureBackground',
+                beforeDraw: (chart) => {
+                    if (!latestData || !latestData.real) return;
+                    const {ctx, chartArea: {top, right, bottom, left, height}} = chart;
+                    
+                    let presentIndex = latestData.real.length - 1;
+                    for (let i = 0; i < latestData.real.length; i++) {
+                        if (latestData.real[i] === null) {
+                            presentIndex = i > 0 ? i - 1 : 0;
+                            break;
+                        }
+                    }
+                    
+                    const meta = chart.getDatasetMeta(0);
+                    if (!meta.data || !meta.data[presentIndex]) return;
+                    const xPresent = meta.data[presentIndex].x;
+                    
+                    ctx.save();
+                    // Fondo Pasado (tono más oscuro/frío)
+                    ctx.fillStyle = 'rgba(0, 30, 60, 0.3)';
+                    ctx.fillRect(left, top, xPresent - left, height);
+                    
+                    // Fondo Futuro (tono diferente)
+                    ctx.fillStyle = 'rgba(60, 20, 60, 0.2)';
+                    ctx.fillRect(xPresent, top, right - xPresent, height);
+                    
+                    // Línea frontera del presente
+                    ctx.beginPath();
+                    ctx.lineWidth = 3;
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+                    ctx.setLineDash([4, 4]);
+                    ctx.moveTo(xPresent, top);
+                    ctx.lineTo(xPresent, bottom);
+                    ctx.stroke();
+                    
+                    // Líneas divisorias de días
+                    ctx.beginPath();
+                    ctx.lineWidth = 1;
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)'; // Más intensa
+                    ctx.setLineDash([2, 4]);
+                    
+                    if (chart.data.labels && chart.data.labels.length > 0) {
+                        const dayLetters = ['D', 'L', 'M', 'X', 'J', 'V', 'S'];
+                        
+                        // Letra del primer día visible
+                        if (latestData && latestData.labels && latestData.labels[0]) {
+                            // Convertir formato para parseo correcto en JS
+                            const d0 = new Date(latestData.labels[0].replace(' ', 'T'));
+                            const dow0 = d0.getDay();
+                            const txt0 = (dow0 === 0 || dow0 === 6) ? `${dayLetters[dow0]} (F)` : dayLetters[dow0];
+                            ctx.save();
+                            ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                            ctx.font = 'bold 13px Inter';
+                            ctx.textAlign = 'left';
+                            ctx.fillText(txt0, left + 8, top + 18);
+                            ctx.restore();
+                        }
+                        
+                        for (let i = 1; i < chart.data.labels.length; i++) {
+                            const prevDay = chart.data.labels[i-1].substring(0, 5);
+                            const currDay = chart.data.labels[i].substring(0, 5);
+                            
+                            if (prevDay !== currDay) {
+                                if (meta.data && meta.data[i]) {
+                                    const xDay = meta.data[i].x;
+                                    ctx.moveTo(xDay, top);
+                                    ctx.lineTo(xDay, bottom);
+                                    
+                                    if (latestData && latestData.labels && latestData.labels[i]) {
+                                        const d = new Date(latestData.labels[i].replace(' ', 'T'));
+                                        const dow = d.getDay();
+                                        const txt = (dow === 0 || dow === 6) ? `${dayLetters[dow]} (F)` : dayLetters[dow];
+                                        
+                                        ctx.save();
+                                        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                                        ctx.font = 'bold 13px Inter';
+                                        ctx.textAlign = 'left';
+                                        ctx.fillText(txt, xDay + 8, top + 18);
+                                        ctx.restore();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ctx.stroke();
+                    
+                    ctx.restore();
+                }
+            };
+
+            demandChart = new Chart(ctx, {
+                plugins: [pastFuturePlugin],
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: 'Demanda Real (MW)',
+                            data: [],
+                            borderColor: '#ff4d4d',
+                            backgroundColor: 'rgba(255, 77, 77, 0.1)',
+                            borderWidth: 3,
+                            pointBackgroundColor: '#ff4d4d',
+                            pointRadius: 3,
+                            fill: true,
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Predicción Modelo (MW)',
+                            data: [],
+                            borderColor: '#00f0ff',
+                            backgroundColor: 'rgba(0, 240, 255, 0.05)',
+                            borderWidth: 3,
+                            borderDash: [5, 5],
+                            pointBackgroundColor: '#00f0ff',
+                            pointRadius: 4,
+                            fill: true,
+                            tension: 0.4,
+                            spanGaps: true
+                        },
+                        {
+                            label: 'Previsión Oficial (MW)',
+                            data: [],
+                            borderColor: '#ff9900',
+                            backgroundColor: 'rgba(255, 153, 0, 0.05)',
+                            borderWidth: 2,
+                            borderDash: [3, 3],
+                            pointBackgroundColor: '#ff9900',
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Trayectoria Actual (MW)',
+                            data: [],
+                            borderColor: '#b534ff',
+                            backgroundColor: 'rgba(181, 52, 255, 0.05)',
+                            borderWidth: 2,
+                            borderDash: [5, 5],
+                            pointBackgroundColor: '#b534ff',
+                            pointRadius: 3,
+                            fill: false,
+                            tension: 0.4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: {
+                        legend: {
+                            labels: {
+                                color: 'rgba(255, 255, 255, 0.8)',
+                                font: { family: 'Inter', size: 14 }
+                            }
+                        },
+                        tooltip: {
+                            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                            titleFont: { family: 'Inter', size: 14 },
+                            bodyFont: { family: 'Inter', size: 13 },
+                            padding: 12,
+                            borderColor: 'rgba(255, 255, 255, 0.1)',
+                            borderWidth: 1
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: { 
+                                color: 'rgba(255, 255, 255, 0.15)',
+                                borderDash: [2, 4],
+                                lineWidth: 1
+                            },
+                            ticks: { 
+                                color: 'rgba(255, 255, 255, 0.6)',
+                                font: { family: 'Inter' },
+                                maxTicksLimit: 48,
+                                maxRotation: 90,
+                                minRotation: 90
+                            }
+                        },
+                        y: {
+                            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                            beginAtZero: false,
+                            ticks: { 
+                                color: 'rgba(255, 255, 255, 0.6)',
+                                font: { family: 'Inter' }
+                            },
+                            title: {
+                                display: true,
+                                text: 'Megavatios (MW)',
+                                color: 'rgba(255, 255, 255, 0.8)',
+                                font: { family: 'Inter', size: 14 }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        async function updateData() {
+            try {
+                const response = await fetch(`/api/demanda?past=${currentPast}&future=${currentFuture}`);
+                const data = await response.json();
+
+                if (data.error) {
+                    console.error("Error from API:", data.error);
+                    return;
+                }
+
+                // Actualizar fechas acortadas (ej: "2026-05-27 10:00" -> "27/05 10:00")
+                const shortLabels = data.labels.map(l => {
+                    const parts = l.split(' ');
+                    const dateParts = parts[0].split('-');
+                    return `${dateParts[2]}/${dateParts[1]} ${parts[1]}`;
+                });
+
+                latestData = data;
+                demandChart.data.labels = shortLabels;
+                demandChart.data.datasets[0].data = data.real;
+                demandChart.data.datasets[1].data = data.predicted[currentHorizon];
+                demandChart.data.datasets[1].label = `Predicción Modelo (${currentHorizon}) (MW)`;
+                demandChart.data.datasets[2].data = data.official;
+
+                demandChart.data.datasets[3].data = data.current_trajectory;
+
+                updateMetrics(data.real, data.predicted[currentHorizon]);
+
+                // Marcar la separación entre pasado y futuro si quisiéramos (con una línea vertical)
+                // Chart.js annotations se podrían usar, pero de momento con el null del dataset[0] queda claro.
+
+                demandChart.update();
+                
+                // Actualizar semáforos
+                if (data.api_status) {
+                    const smardStatus = data.api_status.smard;
+                    const meteoStatus = data.api_status.meteo;
+                    
+                    const smardInd = document.getElementById('smard-status-indicator');
+                    smardInd.className = 'status-indicator status-' + smardStatus.status;
+                    document.getElementById('smard-status-time').innerText = '(' + smardStatus.time.substring(5) + ')';
+                    
+                    const meteoInd = document.getElementById('meteo-status-indicator');
+                    meteoInd.className = 'status-indicator status-' + meteoStatus.status;
+                    document.getElementById('meteo-status-time').innerText = '(' + meteoStatus.time.substring(5) + ')';
+                }
+                
+                const now = new Date();
+                document.getElementById('last-update').innerText = `Última actualización: ${now.toLocaleTimeString()}`;
+            } catch (error) {
+                console.error("Error fetching data:", error);
+                document.getElementById('last-update').innerText = `Error de conexión. Reintentando...`;
+            }
+        }
+
+        window.onload = () => {
+            initChart();
+            updateData();
+            // Refrescar cada 60 segundos
+            setInterval(updateData, 60000);
+        };
+    </script>
+</body>
+</html>

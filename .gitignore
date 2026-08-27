@@ -1,0 +1,27 @@
+# Local configuration and credentials
+.env
+
+# Python environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Generated datasets, models and reports
+bases_de_datos/*.db
+bases_de_datos/*.sqlite*
+train/*
+modelos/*
+logs/*
+*.train
+*.valid
+*.csv
+*.xlsx
+
+# Generated deployment and scheduling files
+*.zip
+conf/crontab_generado.txt
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db

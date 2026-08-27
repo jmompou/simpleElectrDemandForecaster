@@ -1,0 +1,33 @@
+
+# PROGRAMACIÓN DE TAREAS AUTOMÁTICAS (CRON)
+
+# Asistente para entender la tabla de crontab: https://crontab.guru
+
+# 1. RE-ENTRENAMIENTO SEMANAL DEL MODELO (Semanal, domingos)
+# Se ejecuta todos los domingos a las 3:00 AM ('0 3 * * 0').
+# Actualiza el modelo con los últimos 24 meses de datos, con partición cronológica 50/50
+# (--val-ratio 50: 12 meses de entrenamiento y 12 de validación) y parada temprana automática
+# (early_stopping_round = 50 iteraciones, definido en conf/train.conf).
+0 3 * * 0 cd {{RUTA_BASE}} && ./pipeline.sh --recent-days 730 --val-ratio 50 --train-file train/germany-24-meses.train >> {{RUTA_BASE}}/logs/cron_entrenamiento.log 2>&1
+
+# 2. ACTUALIZACIÓN EN TIEMPO REAL DE LA BASE DE DATOS
+# Se ejecuta en los minutos 10 y 40 de cada hora ('10,40 * * * *').
+# Da margen a que los datos horarios oficiales estén publicados, 
+# con un reintento en el minuto 40 por si la API fallase en el minuto 10.
+10,40 * * * * cd {{RUTA_BASE}} && {{RUTA_BASE}}/.venv/bin/python {{RUTA_BASE}}/adquirir_datos.py >> {{RUTA_BASE}}/logs/cron_bd.log 2>&1
+
+# 3. CONSOLIDACIÓN DE DATOS HISTÓRICOS (CATCH-UP / AUTOHEALING)
+# Se ejecuta todos los días a las 1:00 AM ('0 1 * * *').
+# Fuerza la descarga y consolidación de los últimos 7 días enteros para garantizar
+# que no haya huecos y recoger posibles correcciones/revisiones de datos del proveedor.
+0 1 * * * cd {{RUTA_BASE}} && {{RUTA_BASE}}/.venv/bin/python {{RUTA_BASE}}/adquirir_datos.py --recent-days 7 >> {{RUTA_BASE}}/logs/cron_bd.log 2>&1
+
+# 4. AUTOHEALING PROFUNDO (domingos y día 1 de cada mes)
+# Se ejecuta todos los domingos Y ADEMÁS el día 1 de cada mes, a las 2:00 AM ('0 2 1 * 0').
+# Nota: cuando día-del-mes y día-de-semana están ambos restringidos, cron los combina
+# con OR, por lo que esta entrada corre ~4-5 veces al mes, no una. Se programa una hora
+# antes del re-entrenamiento del domingo (tarea 1) para que el modelo entrene sobre
+# datos ya curados.
+# Revisa los últimos 10 años en busca de huecos en la demanda de SMARD, y luego asegura
+# que todas las temperaturas de Open-Meteo y predicciones estén completadas.
+0 2 1 * 0 cd {{RUTA_BASE}} && {{RUTA_BASE}}/.venv/bin/python {{RUTA_BASE}}/adquirir_datos.py --recent-days 3650 >> {{RUTA_BASE}}/logs/cron_bd_deep.log 2>&1 && {{RUTA_BASE}}/.venv/bin/python {{RUTA_BASE}}/adquirir_datos.py --complete >> {{RUTA_BASE}}/logs/cron_bd_deep.log 2>&1
